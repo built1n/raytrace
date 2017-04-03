@@ -9,10 +9,17 @@
 
 #define WIDTH 320
 #define HEIGHT 240
+
 #define MAX(a, b) ((a>b)?(a):(b))
 #define MIN(a, b) ((a<b)?(a):(b))
 #define SQR(a) ((a)*(a))
-#define MAX_BOUNCES 5
+#define SIGN(x) ((x)<0?-1:1)
+
+#define MAX_BOUNCES 10
+#define MOVE_FACTOR .1
+
+
+#define MOUSELOOK
 
 struct rgb_t { unsigned char r, g, b; };
 
@@ -27,8 +34,8 @@ struct object_t {
 };
 
 struct light_t {
-    struct rgb_t color;
     vector position;
+    scalar intensity;
 };
 
 struct scene_t {
@@ -42,24 +49,25 @@ struct scene_t {
 
 struct camera_t {
     vector origin;
-    vector offset; /* direction to center of camera */
+    vector direction; /* direction to center of camera */
     scalar fov_x, fov_y; /* radians */
 };
 
 /* { o, d } form a ray */
-bool object_intersects(struct object_t *obj, const vector* o, const vector* d, scalar *t)
+/* point of intersection is *t * d units away */
+bool object_intersects(struct object_t *obj, vector o, vector d, scalar *t)
 {
-    assert(o->type == RECT);
-    assert(d->type == RECT);
+    assert(o.type == RECT);
+    assert(d.type == RECT);
     switch(obj->type)
     {
     case SPHERE:
     {
-        scalar a = SQR(d->rect.x) + SQR(d->rect.y) + SQR(d->rect.z),
-            b = 2 * ((o->rect.x - obj->sphere.center.rect.x) * d->rect.x +
-                     (o->rect.y - obj->sphere.center.rect.y) * d->rect.y +
-                     (o->rect.z - obj->sphere.center.rect.z) * d->rect.z),
-            c = SQR(o->rect.x - obj->sphere.center.rect.x) + SQR(o->rect.y - obj->sphere.center.rect.y) + SQR(o->rect.z - obj->sphere.center.rect.z) - SQR(obj->sphere.radius);
+        scalar a = SQR(d.rect.x) + SQR(d.rect.y) + SQR(d.rect.z),
+            b = 2 * ((o.rect.x - obj->sphere.center.rect.x) * d.rect.x +
+                     (o.rect.y - obj->sphere.center.rect.y) * d.rect.y +
+                     (o.rect.z - obj->sphere.center.rect.z) * d.rect.z),
+            c = SQR(o.rect.x - obj->sphere.center.rect.x) + SQR(o.rect.y - obj->sphere.center.rect.y) + SQR(o.rect.z - obj->sphere.center.rect.z) - SQR(obj->sphere.radius);
         scalar disc = b*b - 4*a*c;
         if(disc < 0)
         {
@@ -80,9 +88,9 @@ bool object_intersects(struct object_t *obj, const vector* o, const vector* d, s
             *t = MAX(t1, t2);
             return true;
         }
-        vector prod = *d;
-        vect_mul(&prod, t2);
-        vect_add(&prod, o);
+        vector prod = d;
+        prod = vect_mul(prod, t2);
+        prod = vect_add(prod, o);
         //printf("ray from (%f, %f, %f) intersects sphere at point %f, %f, %f (%f)\n", o->rect.x, o->rect.y, o->rect.z, prod.rect.x, prod.rect.y, prod.rect.z, vect_abs(&prod));
         *t = MIN(t1, t2);
         return true;
@@ -90,60 +98,59 @@ bool object_intersects(struct object_t *obj, const vector* o, const vector* d, s
     }
 }
 
-vector normal_at_point(const vector *pt, const struct object_t *obj)
+vector normal_at_point(vector pt, const struct object_t *obj)
 {
     vector normal;
     switch(obj->type)
     {
     case SPHERE:
     {
-        vector p = *pt;
-        vect_sub(&p, &obj->sphere.center);
-        normal = p;
+        normal = vect_sub(pt, obj->sphere.center);
         break;
     }
     default:
         assert(false);
     }
-    vect_normalize(&normal);
-    return normal;
+    return vect_normalize(normal);
 }
 
 /* return the direction of the reflected ray */
-vector reflect_ray(const vector *pt, const vector *d, const vector *normal, const struct object_t *obj)
+vector reflect_ray(vector pt, vector d, vector normal, const struct object_t *obj)
 {
     scalar c = -2 * vect_dot(d, normal);
-    vector reflected = *normal;
-    vect_mul(&reflected, c);
-    vect_add(&reflected, d);
+    vector reflected = normal;
+    reflected = vect_mul(reflected, c);
+    reflected = vect_add(reflected, d);
     return reflected;
 }
 
-struct rgb_t blend(struct rgb_t a, struct rgb_t b, int alpha)
+struct rgb_t blend(struct rgb_t a, struct rgb_t b, unsigned char alpha)
 {
     struct rgb_t ret;
-    unsigned long r1, g1, b1;
-    r1 = (((int)a.r * alpha) + ((int)b.r * (255 - alpha))) / 255;
-    g1 = (((int)a.g * alpha) + ((int)b.g * (255 - alpha))) / 255;
-    b1 = (((int)a.b * alpha) + ((int)b.b * (255 - alpha))) / 255;
-    ret = (struct rgb_t){r1, g1, b1};
+    unsigned char r1, g1, b1;
+    ret.r = (((int)a.r * alpha) + ((int)b.r * (255 - alpha))) / 255;
+    ret.g = (((int)a.g * alpha) + ((int)b.g * (255 - alpha))) / 255;
+    ret.b = (((int)a.b * alpha) + ((int)b.b * (255 - alpha))) / 255;
     return ret;
 }
 
 static const struct object_t *scene_intersections(const struct scene_t *scene,
-                                                  const vector *orig, const vector *d, scalar *closest)
+                                                  vector orig, vector d, scalar *dist, const struct object_t *avoid)
 {
-    *closest = -1;
+    *dist = -1;
     const struct object_t *obj = NULL;
     /* check intersections */
     for(int i = 0; i < scene->n_objects; ++i)
     {
+        /* avoid intersections with the same object */
+        if(avoid == scene->objects + i)
+            continue;
         scalar t;
         if(object_intersects(scene->objects + i, orig, d, &t))
         {
-            if(*closest < 0 || t < *closest)
+            if(*dist < 0 || t < *dist)
             {
-                *closest = t;
+                *dist = t;
                 obj = scene->objects + i;
             }
         }
@@ -151,62 +158,68 @@ static const struct object_t *scene_intersections(const struct scene_t *scene,
     return obj;
 }
 
-struct rgb_t trace_ray(const struct scene_t *scene, const vector *orig, const vector *d, int max_iters)
+struct rgb_t trace_ray(const struct scene_t *scene, vector orig, vector d, int max_iters, const struct object_t *avoid)
 {
     struct rgb_t primary = scene->bg;
-    scalar closest; /* distance from camera in terms of d */
-    const struct object_t *closest_obj = scene_intersections(scene, orig, d, &closest);
+    scalar hit_dist; /* distance from camera in terms of d */
+    const struct object_t *hit_obj = scene_intersections(scene, orig, d, &hit_dist, avoid);
 
     struct rgb_t reflected = {0, 0, 0};
-    if(closest_obj)
+    int specular = 255;
+    if(hit_obj)
     {
         //printf("pow!\n");
-        primary = closest_obj->color;
+        primary = hit_obj->color;
 
         /* shade */
         scalar shade_total = 0;
 
-        vector pt = *d;
-        vect_mul(&pt, closest);
-        vect_add(&pt, orig);
+        vector pt = d;
+        pt = vect_mul(pt, hit_dist);
+        pt = vect_add(pt, orig);
 
-        vector normal = normal_at_point(&pt, closest_obj);
+        vector normal = normal_at_point(pt, hit_obj);
 
         for(int i = 0; i < scene->n_lights; ++i)
         {
             /* get vector to light */
             vector light_dir = scene->lights[i].position;
-            vect_sub(&light_dir, &pt);
+            light_dir = vect_sub(light_dir, pt);
 
-            scalar light_dist = vect_abs(&light_dir);
+            scalar light_dist = vect_abs(light_dir);
 
-            vect_normalize(&light_dir);
+            light_dir = vect_normalize(light_dir);
 
             /* see if light is occluded */
             scalar nearest;
-            if(scene_intersections(scene, &pt, &light_dir, &nearest))
-                if(nearest < light_dist)
-                    continue;
+            const struct object_t *obj = scene_intersections(scene, pt, light_dir, &nearest, hit_obj);
 
-            scalar shade = vect_dot(&normal, &light_dir);
+            if(obj && nearest < light_dist)
+                continue;
+
+            scalar shade = vect_dot(normal, light_dir);
             if(shade > 0)
-                shade_total += shade;
+                shade_total += shade * scene->lights[i].intensity;
         }
+
+        if(shade_total > 1)
+            shade_total = 1;
 
         scalar diffuse = 1 - scene->ambient;
         primary.r *= (scene->ambient + diffuse * shade_total);
         primary.g *= (scene->ambient + diffuse * shade_total);
         primary.b *= (scene->ambient + diffuse * shade_total);
 
+        specular = 255 - hit_obj->specularity;
         /* reflections */
-        if(closest_obj->specularity && max_iters > 0)
+        if(specular != 255 && max_iters > 0)
         {
-            vector ref = reflect_ray(&pt, d, &normal, closest_obj);
-            reflected = trace_ray(scene, &pt, &ref, max_iters - 1);
+            vector ref = reflect_ray(pt, d, normal, hit_obj);
+            reflected = trace_ray(scene, pt, ref, max_iters - 1, hit_obj);
         }
     }
 
-    return blend(primary, reflected, closest_obj ? (255 - closest_obj->specularity) : 255);
+    return blend(primary, reflected, specular);
 }
 
 unsigned char *render_scene(int w, int h, const struct scene_t *scene,
@@ -227,7 +240,7 @@ unsigned char *render_scene(int w, int h, const struct scene_t *scene,
             scalar rot_x = (x - w / 2) * scale_x, rot_y = (y - h / 2) * scale_y;
 
             /* rotate the offset vector */
-            vector d = cam->offset;
+            vector d = cam->direction;
             vect_to_sph(&d);
 
             d.sph.elevation -= rot_y;
@@ -239,7 +252,7 @@ unsigned char *render_scene(int w, int h, const struct scene_t *scene,
 
             /* cam->origin and d now form the camera ray */
 
-            struct rgb_t color = trace_ray(scene, &cam->origin, &d, MAX_BOUNCES);
+            struct rgb_t color = trace_ray(scene, cam->origin, d, MAX_BOUNCES, NULL);
 
             fb[y * w * 3 + 3 * x] = color.r;
             fb[y * w * 3 + 3 * x + 1] = color.g;
@@ -267,13 +280,13 @@ int main()
     sph[0].sphere.center = (vector) { RECT, {0, 0, 1 } };
     sph[0].sphere.radius = 1;
     sph[0].color = (struct rgb_t){0, 0, 0xff};
-    sph[0].specularity = 0;
+    sph[0].specularity = 20;
 
     sph[1].type = SPHERE;
     sph[1].sphere.center = (vector) { RECT, {0, 0, -1 } };
     sph[1].sphere.radius = 1;
     sph[1].color = (struct rgb_t){0, 0xe0, 0};
-    sph[1].specularity = 0x60;
+    sph[1].specularity = 0xef;
 
     sph[2].type = SPHERE;
     sph[2].sphere.center = (vector) { RECT, {0, 0, -3 } };
@@ -283,6 +296,7 @@ int main()
 
     struct light_t lights[1];
     lights[0].position = (vector) { RECT, {0, 10, -10} };
+    lights[0].intensity = 2;
 
     scene.objects = sph;
     scene.n_objects = 3;
@@ -291,7 +305,7 @@ int main()
 
     struct camera_t cam;
     cam.origin = (vector){ RECT, {-5, 0, 0} };
-    cam.offset = (vector){ RECT, {0, 0, 1} };
+    cam.direction = (vector){ RECT, {0, 0, 1} };
     cam.fov_x = M_PI / 2;
     cam.fov_y = M_PI / 2 * HEIGHT / WIDTH;
 
@@ -301,6 +315,7 @@ int main()
     fprintf(f, "P6\n%d %d\n%d\n", WIDTH, HEIGHT, 255);
     fwrite(fb, WIDTH * HEIGHT, 3, f);
     fclose(f);
+    free(fb);
     return 0;
 
 #else
@@ -310,6 +325,17 @@ int main()
 
     while(1)
     {
+#ifdef MOUSELOOK
+        /* mouse look */
+        int x, y;
+        unsigned mouse = SDL_GetMouseState(&x, &y);
+        x -= WIDTH / 2;
+        y -= HEIGHT / 2;
+        vect_to_sph(&cam.direction);
+        cam.direction.sph.azimuth += M_PI/30 * SIGN(x)*SQR((scalar)x / WIDTH);
+        cam.direction.sph.elevation += M_PI/30 * SIGN(y)*SQR((scalar)y / HEIGHT);
+#endif
+
         unsigned char *fb = render_scene(WIDTH, HEIGHT, &scene, &cam);
         memcpy(screen->pixels, fb, WIDTH * HEIGHT * 3);
         SDL_UpdateRect(screen, 0, 0, 0, 0);
@@ -338,10 +364,10 @@ int main()
                     cam.origin.rect.y -= .1;
                     break;
                 case SDLK_w:
-                    cam.origin.rect.x += .1;
+                    cam.origin = vect_add(cam.origin, vect_mul(cam.direction, MOVE_FACTOR));
                     break;
                 case SDLK_s:
-                    cam.origin.rect.x -= .1;
+                    cam.origin = vect_sub(cam.origin, vect_mul(cam.direction, MOVE_FACTOR));
                     break;
                 case SDLK_MINUS:
                     cam.fov_x += M_PI/36;
@@ -351,17 +377,18 @@ int main()
                     cam.fov_x -= M_PI/36;
                     cam.fov_y = cam.fov_x * HEIGHT/WIDTH;
                     break;
-                case SDLK_d:
-                    vect_to_sph(&cam.offset);
-                    cam.offset.sph.elevation -= M_PI/720;
-                    printf("elevation is %f\n",                    cam.offset.sph.elevation);
-                    vect_to_rect(&cam.offset);
-                    break;
                 case SDLK_a:
-                    vect_to_sph(&cam.offset);
-                    cam.offset.sph.elevation += M_PI/720;
-                    vect_to_rect(&cam.offset);
+                {
+                    vect_to_sph(&cam.direction);
+                    cam.direction.sph.azimuth -= M_PI/180;
                     break;
+                }
+                case SDLK_d:
+                {
+                    vect_to_sph(&cam.direction);
+                    cam.direction.sph.azimuth += M_PI/180;
+                    break;
+                }
                 }
                 break;
             }

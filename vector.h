@@ -14,15 +14,16 @@ typedef struct vector_t {
     };
 } vector;
 
-scalar vect_abs(const vector*);
+scalar vect_abs(vector);
 
-void vect_mul(vector*, scalar);
-void vect_add(vector*, const vector*);
+vector vect_mul(vector, scalar);
+vector vect_add(vector, vector);
+vector vect_sub(vector, vector);
+
+vector vect_normalize(vector);
+vector vect_negate(vector);
 
 void vect_to_rect(vector*);
 void vect_to_sph(vector*);
-void vect_sub(vector*, const vector*);
-void vect_negate(vector*);
-void vect_normalize(vector*);
 
-scalar vect_dot(const vector *v1, const vector *v2);
+scalar vect_dot(vector v1, vector v2);
