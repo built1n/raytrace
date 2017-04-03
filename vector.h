@@ -1,6 +1,6 @@
 #include <math.h>
 
-typedef double scalar;
+typedef float scalar;
 
 typedef struct vector_t {
     enum { RECT, SPH } type;
@@ -23,5 +23,6 @@ void vect_to_rect(vector*);
 void vect_to_sph(vector*);
 void vect_sub(vector*, const vector*);
 void vect_negate(vector*);
+void vect_normalize(vector*);
 
 scalar vect_dot(const vector *v1, const vector *v2);

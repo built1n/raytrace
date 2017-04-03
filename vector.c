@@ -108,3 +108,9 @@ scalar vect_dot(const vector *v1, const vector *v2)
     vect_to_rect(&b);
     return a.rect.x * b.rect.x + a.rect.y * b.rect.y + a.rect.z * b.rect.z;
 }
+
+void vect_normalize(vector *v)
+{
+    scalar abs = vect_abs(v);
+    vect_mul(v, 1./abs);
+}
