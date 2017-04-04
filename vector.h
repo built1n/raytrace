@@ -27,3 +27,4 @@ void vect_to_rect(vector*);
 void vect_to_sph(vector*);
 
 scalar vect_dot(vector v1, vector v2);
+vector vect_cross(vector v1, vector v2);

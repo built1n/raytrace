@@ -123,3 +123,13 @@ vector vect_normalize(vector v)
     }
     return v;
 }
+
+vector vect_cross(vector v1, vector v2)
+{
+    vect_to_rect(&v1);
+    vect_to_rect(&v2);
+    vector ret = { RECT, { v1.rect.y * v2.rect.z - v1.rect.z * v2.rect.y,
+                           v1.rect.z * v2.rect.x - v1.rect.x * v2.rect.z,
+                           v1.rect.x * v2.rect.y - v1.rect.y * v2.rect.x, } };
+    return ret;
+}
