@@ -109,6 +109,17 @@ scalar vect_dot(vector v1, vector v2)
 
 vector vect_normalize(vector v)
 {
-    scalar a = vect_abs(v);
-    return vect_mul(v, 1./a);
+    switch(v.type)
+    {
+    case RECT:
+    {
+        scalar a = vect_abs(v);
+        v = vect_mul(v, 1./a);
+        break;
+    }
+    case SPH:
+        v.sph.r = 1;
+        break;
+    }
+    return v;
 }
