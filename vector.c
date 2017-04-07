@@ -41,7 +41,7 @@ scalar vect_abs(vector v)
     switch(v.type)
     {
     case SPH:
-        return v.sph.r;
+        return fabs(v.sph.r);
     case RECT:
         return sqrt(v.rect.x * v.rect.x + v.rect.y * v.rect.y + v.rect.z * v.rect.z);
     }

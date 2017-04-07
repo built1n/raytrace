@@ -9,18 +9,20 @@
 #include <SDL/SDL.h>
 #include <SDL/SDL_video.h>
 
-#define WIDTH 40
-#define HEIGHT 30
+#define WIDTH 320
+#define HEIGHT 240
 
 #define MAX(a, b) ((a>b)?(a):(b))
 #define MIN(a, b) ((a<b)?(a):(b))
 #define SQR(a) ((a)*(a))
 #define SIGN(x) ((x)<0?-1:1)
 
-#define MAX_BOUNCES 200
+#define MAX_BOUNCES 50
 #define MIN_BOUNCES 2
 #define MOVE_FACTOR .15
 #define TARGET_MS 50
+
+#define N_LIGHTS 1
 
 #define PPMOUT
 
@@ -33,7 +35,7 @@ struct object_t {
     union {
         struct { vector center; scalar radius; } sphere;
         struct { vector point, normal; } plane;
-        struct { vector points[3]; } tri;
+        struct { vector points[3], normal, u, v; scalar uu, uv, vv, dn; } tri;
     };
     struct rgb_t color;
     int specularity; /* 0-255 */
@@ -54,17 +56,32 @@ struct scene_t {
 };
 
 struct camera_t {
-    vector origin;
-    vector direction; /* direction to center of camera */
+    vector origin; /* position */
+    vector direction;
     scalar fov_x, fov_y; /* radians */
 };
+
+void preprocess_object(struct object_t *obj)
+{
+    switch(obj->type)
+    {
+    case TRI:
+        obj->tri.u = vect_sub(obj->tri.points[1], obj->tri.points[0]);
+        obj->tri.v = vect_sub(obj->tri.points[2], obj->tri.points[0]);
+        obj->tri.normal = vect_cross(obj->tri.u, obj->tri.v);
+        obj->tri.uu = vect_dot(obj->tri.u, obj->tri.u);
+        obj->tri.uv = vect_dot(obj->tri.u, obj->tri.v);
+        obj->tri.vv = vect_dot(obj->tri.v, obj->tri.v);
+        obj->tri.dn = SQR(obj->tri.uv) - obj->tri.uu * obj->tri.vv;
+        break;
+    }
+}
 
 /* { o, d } form a ray */
 /* point of intersection is *t * d units away */
 inline bool object_intersects(const struct object_t *obj, vector o, vector d, scalar *t)
 {
     assert(o.type == RECT);
-    vect_to_rect(&d);
     assert(d.type == RECT);
     switch(obj->type)
     {
@@ -117,22 +134,19 @@ inline bool object_intersects(const struct object_t *obj, vector o, vector d, sc
     }
     case TRI:
     {
-        vector u = vect_sub(obj->tri.points[1], obj->tri.points[0]);
-        vector v = vect_sub(obj->tri.points[2], obj->tri.points[0]);
-        vector normal = vect_cross(u, v);
-        if(vect_abs(normal) == 0)
+        if(vect_abs(obj->tri.normal) == 0)
         {
             //printf("degenerate triangle\n");
             return false;
         }
-        scalar denom = vect_dot(normal, d);
+        scalar denom = vect_dot(obj->tri.normal, d);
         /* doesn't intersect plane of triangle */
         if(!denom)
         {
             //printf("parallel\n");
             return false;
         }
-        scalar t1 = vect_dot(normal, vect_sub(obj->tri.points[0], o)) / denom;
+        scalar t1 = vect_dot(obj->tri.normal, vect_sub(obj->tri.points[0], o)) / denom;
         /* behind camera */
         if(t1 <= 0)
         {
@@ -142,21 +156,17 @@ inline bool object_intersects(const struct object_t *obj, vector o, vector d, sc
 
         vector pt = vect_add(vect_mul(d, t1), o);
         vect_to_rect(&pt);
-        scalar uu, uv, vv, wu, wv;
-        uu = vect_dot(u, u);
-        uv = vect_dot(u, v);
-        vv = vect_dot(v, v);
+        scalar wu, wv;
         vector w = vect_sub(pt, obj->tri.points[0]);
-        wu = vect_dot(w, u);
-        wv = vect_dot(w, v);
-        denom = SQR(uv) - uu * vv;
-        scalar s1 = (uv * wv - vv * wu) / denom;
+        wu = vect_dot(w, obj->tri.u);
+        wv = vect_dot(w, obj->tri.v);
+        scalar s1 = (obj->tri.uv * wv - obj->tri.vv * wu) / obj->tri.dn;
         if(s1 < 0. || s1 > 1.)
         {
             //printf("not inside\n");
             return false;
         }
-        scalar s2 = (uv * wu - uu * wv) / denom;
+        scalar s2 = (obj->tri.uv * wu - obj->tri.uu * wv) / obj->tri.dn;
         if(s2 < 0. || (s1 + s2) > 1.)
         {
             //printf("not inside\n");
@@ -180,8 +190,7 @@ vector normal_at_point(vector pt, const struct object_t *obj)
         normal = obj->plane.normal;
         break;
     case TRI:
-        normal = vect_cross(vect_sub(obj->tri.points[1], obj->tri.points[2]),
-                            vect_sub(obj->tri.points[3], obj->tri.points[2]));
+        normal = vect_negate(obj->tri.normal);
         break;
     default:
         assert(false);
@@ -284,7 +293,7 @@ struct rgb_t trace_ray(const struct scene_t *scene, vector orig, vector d, int m
 
             scalar shade = vect_dot(normal, light_dir);
             if(shade > 0)
-                shade_total += shade * scene->lights[i].intensity * 1 / (SQR(light_dist));
+                shade_total += shade * scene->lights[i].intensity * 1 / SQR(light_dist);
         }
 
         if(shade_total > 1)
@@ -297,16 +306,36 @@ struct rgb_t trace_ray(const struct scene_t *scene, vector orig, vector d, int m
             vector ref = reflect_ray(pt, d, normal, hit_obj);
             reflected = trace_ray(scene, pt, ref, max_iters - 1, hit_obj);
         }
+
+        scalar diffuse = 1 - scene->ambient;
+        primary.r *= (scene->ambient + diffuse * shade_total);
+        primary.g *= (scene->ambient + diffuse * shade_total);
+        primary.b *= (scene->ambient + diffuse * shade_total);
     }
 
     struct rgb_t mixed = blend(primary, reflected, specular);
 
-    scalar diffuse = 1 - scene->ambient;
-    mixed.r *= (scene->ambient + diffuse * shade_total);
-    mixed.g *= (scene->ambient + diffuse * shade_total);
-    mixed.b *= (scene->ambient + diffuse * shade_total);
 
     return mixed;
+}
+
+vector ray_to_pixel(vector origin, vector direction, int x, int y, int w, int h, const struct camera_t *cam)
+{
+    scalar scale_x = tan(.5 * cam->fov_x / w), scale_y = tan(.5 * cam->fov_y / h);
+
+    /* rot in range of [-fov / 2, fov / 2) */
+    scalar rot_x = (x - w / 2) * scale_x, rot_y = (y - h / 2) * scale_y;
+
+    /* rotate the offset vector */
+
+    vector d = direction;
+    assert(d.type == SPH);
+
+    d.sph.elevation -= rot_y;
+    d.sph.azimuth += rot_x;
+
+    vect_to_rect(&d);
+    return d;
 }
 
 void render_lines(unsigned char *fb, int w, int h,
@@ -314,7 +343,7 @@ void render_lines(unsigned char *fb, int w, int h,
                   const struct camera_t *cam,
                   int start, int end, int bounces, int worker)
 {
-    scalar scale_x = cam->fov_x / w, scale_y = cam->fov_y / h;
+    scalar scale_x = tan(.5 * cam->fov_x / w), scale_y = tan(.5 * cam->fov_y / h);
 
     vector direction = cam->direction;
     vect_to_sph(&direction);
@@ -330,15 +359,7 @@ void render_lines(unsigned char *fb, int w, int h,
             /* rot in range of [-fov / 2, fov / 2) */
             scalar rot_x = (x - w / 2) * scale_x, rot_y = (y - h / 2) * scale_y;
 
-            /* rotate the offset vector */
-
-            vector d = direction;
-            d.sph.elevation -= rot_y;
-            d.sph.azimuth += rot_x;
-
-            vect_to_rect(&d);
-
-            //printf("(%d, %d) maps to (%f, %f, %f)\n", x, y, d.rect.x, d.rect.y, d.rect.z);
+            vector d = ray_to_pixel(cam->origin, direction, x, y, w, h, cam);
 
             /* cam->origin and d now form the camera ray */
 
@@ -356,7 +377,7 @@ void render_lines(unsigned char *fb, int w, int h,
 
         }
 #ifdef PPMOUT
-        printf("Worker %d: %d%% (%d/%d)\n", worker, 100 * y / h, y, h);
+        printf("Worker %d: %d%% (%d/%d)\n", worker, 100 * (y+1) / h, y+1, h);
 #endif
     }
 }
@@ -409,112 +430,82 @@ scalar rand_norm(void)
     return rand() / (scalar)RAND_MAX;
 }
 
+void preprocess_scene(const struct scene_t *scene)
+{
+    for(int i = 0; i < scene->n_objects; ++i)
+    {
+        preprocess_object(scene->objects + i);
+    }
+}
+
 int main()
 {
     struct scene_t scene;
     scene.bg.r = 0x87;
     scene.bg.g = 0xce;
     scene.bg.b = 0xeb;
-    scene.ambient = .5;
+    scene.ambient = .2;
 
     struct object_t sph[8];
 
 #if 1
     sph[0].type = SPHERE;
-    sph[0].sphere.center = (vector) { RECT, {0, 1, 1 } };
+    sph[0].sphere.center = (vector) { RECT, {1, 1, 0 } };
     sph[0].sphere.radius = 1;
     sph[0].color = (struct rgb_t){0, 0, 0xff};
     sph[0].specularity = 0xf0;
 
     sph[1].type = SPHERE;
-    sph[1].sphere.center = (vector) { RECT, {0, 1, -1 } };
+    sph[1].sphere.center = (vector) { RECT, {-1, 1, 0 } };
     sph[1].sphere.radius = 1;
     sph[1].color = (struct rgb_t){0xff, 0, 0};
     sph[1].specularity = 40;
 
     sph[2].type = SPHERE;
-    sph[2].sphere.center = (vector) { RECT, {0, 1, -3 } };
+    sph[2].sphere.center = (vector) { RECT, {-3, 1, 0 } };
     sph[2].sphere.radius = 1;
     sph[2].color = (struct rgb_t){0xff, 0xff, 0xff};
     sph[2].specularity = 0xf0;
 
     sph[3].type = PLANE;
-    sph[3].plane.point = (vector) { RECT, {0, 0, 100 } };
+    sph[3].plane.point = (vector) { RECT, {0, 0, 0 } };
     sph[3].plane.normal = (vector) { RECT, {0, 1, 0 } };
     sph[3].color = (struct rgb_t) {0, 0xff, 0};
     sph[3].specularity = 0;
 #endif
 
     sph[4].type = TRI;
-    sph[4].tri.points[0] = (vector) { RECT, {0, 0, 0 } };
-    sph[4].tri.points[1] = (vector) { RECT, {0, 5, 0 } };
-    sph[4].tri.points[2] = (vector) { RECT, {0, 0, 5 } };
-    sph[4].color = (struct rgb_t) {0xff, 0, 0xff};
-    sph[4].specularity = 0;
-
-    sph[5].type = TRI;
-    sph[5].tri.points[0] = (vector) { RECT, {0, 5, 5 } };
-    sph[5].tri.points[1] = (vector) { RECT, {0, 5, 0 } };
-    sph[5].tri.points[2] = (vector) { RECT, {0, 0, 5 } };
-    sph[5].color = (struct rgb_t) {0xff, 0, 0xff};
-    sph[5].specularity = 0;
-
-    sph[6].type = TRI;
-    sph[6].tri.points[0] = (vector) { RECT, {10, 0, -5 } };
-    sph[6].tri.points[1] = (vector) { RECT, {5, 5, 0 } };
-    sph[6].tri.points[2] = (vector) { RECT, {0, 0, -5 } };
-    sph[6].color = (struct rgb_t) {0xff, 0, 0xff};
-    sph[6].specularity = 0xe0;
-#if 0
-    sph[4].type = PLANE;
-    sph[4].plane.point = (vector) { RECT, {10, 0, 0 } };
-    sph[4].plane.normal = (vector) { RECT, {-1, 0, 0 } };
-    sph[4].color = (struct rgb_t) {224, 223, 91};
-    sph[4].specularity = 0xf0;
-
-    sph[5].type = PLANE;
-    sph[5].plane.point = (vector) { RECT, {-10, 0, 0 } };
-    sph[5].plane.normal = (vector) { RECT, {1, 0, 0 } };
-    sph[5].color = (struct rgb_t) {224, 223, 91};
-    sph[5].specularity = 0xf0;
-
-
-    sph[4].type = PLANE;
-    sph[4].plane.point = (vector) { RECT, {0, 0, -10 } };
-    sph[4].plane.normal = (vector) { RECT, {0, 0, 1 } };
-    sph[4].color = (struct rgb_t) {224, 223, 91};
-    sph[4].specularity = 0xf0;
-
-    sph[5].type = PLANE;
-    sph[5].plane.point = (vector) { RECT, {0, 0, 10 } };
-    sph[5].plane.normal = (vector) { RECT, {0, 0, -1 } };
-    sph[5].color = (struct rgb_t) {224, 223, 91};
-    sph[5].specularity = 0xf0;
-#endif
+    sph[4].tri.points[0] = (vector) { RECT, {5, 0, 0 } };
+    sph[4].tri.points[1] = (vector) { RECT, {5, 5, 0 } };
+    sph[4].tri.points[2] = (vector) { RECT, {0, 5, 0 } };
+    sph[4].color = (struct rgb_t) {0xff, 0, 0};
+    sph[4].specularity = 0x30;
 
     /* distribute evenly in a sphere of r = 1 */
-    struct light_t lights[50];
-    for(int i = 0; i < 50; ++i)
+    struct light_t lights[N_LIGHTS];
+    for(int i = 0; i < N_LIGHTS; ++i)
     {
-        lights[i].position = vect_add((vector) { RECT, {5, 10, 0} },
+        lights[i].position = vect_add((vector) { RECT, {5, 10, -5} },
                                       (vector) { SPH, { .sph.r = rand_norm(),
                                                   .sph.elevation = 2 * M_PI * (rand_norm() - .5),
                                                   .sph.azimuth = 4 * M_PI * (rand_norm() - .5) } } );
-        lights[i].intensity = 4;
+        lights[i].intensity = 200 / N_LIGHTS;
     }
 
     scene.objects = sph;
-    scene.n_objects = 7;
+    scene.n_objects = 5;
     scene.lights = lights;
-    scene.n_lights = 50;
+    scene.n_lights = N_LIGHTS;
 
     struct camera_t cam;
-    cam.origin = (vector){ RECT, {-5, 2, -1} };
-    cam.direction = (vector){ RECT, {0, 0, 1} };
-    cam.fov_x = M_PI / 2;
-    cam.fov_y = M_PI / 2 * HEIGHT / WIDTH;
+    cam.origin = (vector){ RECT, {0, 1, -5} };
+    cam.direction = (vector){ RECT, {1, 0, 0} };
+    cam.fov_x = M_PI;
+    cam.fov_y = M_PI * HEIGHT / WIDTH;
 
     unsigned char *fb = malloc(WIDTH * HEIGHT * 3);
+
+    preprocess_scene(&scene);
 
 #ifdef PPMOUT
     render_scene(fb, WIDTH, HEIGHT, &scene, &cam, 2, MAX_BOUNCES);
@@ -537,7 +528,6 @@ int main()
 
     while(1)
     {
-        //lights[0].position.rect.z += .05;
 #ifdef MOUSELOOK
         /* mouse look */
         int x, y;
@@ -547,6 +537,17 @@ int main()
         vect_to_sph(&cam.direction);
         cam.direction.sph.azimuth += M_PI/10 * SIGN(x)*SQR((scalar)x / WIDTH);
         cam.direction.sph.elevation += M_PI/10 * SIGN(y)*SQR((scalar)y / HEIGHT);
+        if(mouse & SDL_BUTTON(1))
+        {
+            vector d = ray_to_pixel(cam.origin, cam.direction, x + WIDTH/2, y + HEIGHT/2, WIDTH, HEIGHT, &cam);
+            scalar dist;
+            struct object_t *obj = scene_intersections(&scene, cam.origin, d, &dist, NULL);
+            if(obj)
+            {
+                obj->color = (struct rgb_t) { 0xff, 0, 0xff };
+                printf("Clicked object at %d, %d\n", x, y);
+            }
+        }
 #endif
 
         render_scene(fb, WIDTH, HEIGHT, &scene, &cam, 2, bounces);
@@ -569,9 +570,6 @@ int main()
             if(bounces < MIN_BOUNCES)
                 bounces = MIN_BOUNCES;
         }
-
-
-        printf("%d bounces\n", bounces);
 
         ts = now;
 
